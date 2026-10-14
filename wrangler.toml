@@ -1,0 +1,16 @@
+name = "alphaprep-ng"
+compatibility_date = "2024-09-23"
+pages_build_output_dir = "dist"
+
+# After running `wrangler d1 create alphaprep-ng` (or creating the database
+# in the Cloudflare dashboard), paste the database_id below.
+[[d1_databases]]
+binding = "DB"
+database_name = "alphaprep-ng"
+database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+migrations_dir = "migrations"
+
+[vars]
+APP_TIMEZONE = "Africa/Lagos"
+# Secrets (ADMIN_BOOTSTRAP_SECRET, SESSION_PEPPER) are NOT set here.
+# Add them in Cloudflare dashboard -> Pages project -> Settings -> Variables and Secrets.
