@@ -9,7 +9,8 @@
     "typecheck": "tsc --noEmit",
     "preview": "wrangler pages dev dist --d1=DB",
     "db:migrate:local": "wrangler d1 migrations apply alphaprep-ng --local",
-    "db:migrate:remote": "wrangler d1 migrations apply alphaprep-ng --remote"
+    "db:migrate:remote": "wrangler d1 migrations apply alphaprep-ng --remote",
+    "test": "node --experimental-strip-types --disable-warning=ExperimentalWarning --test tests/*.test.ts"
   },
   "dependencies": {
     "hono": "^4.6.0",
@@ -24,7 +25,7 @@
     "@types/react-dom": "^18.3.0",
     "@vitejs/plugin-react": "^4.3.1",
     "tailwindcss": "^4.0.0",
-    "typescript": "^5.5.4",
+    "typescript": "~5.6.3",
     "vite": "^5.4.0",
     "wrangler": "^3.78.0"
   }
