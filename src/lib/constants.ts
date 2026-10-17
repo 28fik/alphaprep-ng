@@ -51,3 +51,10 @@ export const SUBJECT_GROUPS: { title: string; subjects: { id: string; name: stri
 
 export const PARTICIPANT_ID_PATTERN = /^JAMB\d{4}[A-Z]{2}$/;
 export const EXAM_RULES = { questions: 180, minutes: 120, maxScore: 400 };
+
+/** Every subject once (Mathematics appears in two groups above but is one subject). */
+export const ALL_SUBJECTS: { id: string; name: string }[] = [
+  { id: "english", name: "Use of English" },
+  ...Array.from(new Map(SUBJECT_GROUPS.flatMap((g) => g.subjects).map((s) => [s.id, s] as const)).values()),
+];
+export const subjectName = (id: string) => ALL_SUBJECTS.find((s) => s.id === id)?.name ?? id;

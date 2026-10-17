@@ -1,8 +1,8 @@
 import { useEffect, useState, type FormEvent } from "react";
-import { Link, useSearchParams } from "react-router-dom";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import StateBox from "../components/StateBox";
 import SubjectPicker from "../components/SubjectPicker";
-import { api, ApiError, type ParticipantProfile } from "../lib/api";
+import { api, ApiError, saveAttempt, type ParticipantProfile, type PublicStatus } from "../lib/api";
 import { PARTICIPANT_ID_PATTERN } from "../lib/constants";
 
 type View =
@@ -23,6 +23,32 @@ export default function Continue() {
   const [editing, setEditing] = useState(false);
   const [picked, setPicked] = useState<string[]>([]);
   const [saved, setSaved] = useState(false);
+  const navigate = useNavigate();
+  const [needShare, setNeedShare] = useState(false);
+  const [shared, setShared] = useState(false);
+  const [site, setSite] = useState<PublicStatus | null>(null);
+  const [startError, setStartError] = useState("");
+
+  useEffect(() => { api<PublicStatus>("/status").then(setSite).catch(() => undefined); }, []);
+
+  async function startExam() {
+    setStartError("");
+    setBusy(true);
+    try {
+      const r = await api<{ attempt_id: number; attempt_token: string }>("/exam/start", {
+        method: "POST",
+        body: JSON.stringify({ id, share_confirmed: shared }),
+      });
+      saveAttempt({ id: r.attempt_id, token: r.attempt_token, pid: id });
+      navigate("/exam");
+    } catch (err) {
+      const e = err as ApiError;
+      if (e.data?.needs_share) setNeedShare(true);
+      setStartError(e.message);
+    } finally {
+      setBusy(false);
+    }
+  }
 
   useEffect(() => {
     if (!valid) return;
@@ -166,9 +192,46 @@ export default function Continue() {
           {elig.exam ? `${elig.exam.title} · ${elig.exam.exam_date}` : "No examination scheduled."}
         </p>
         {elig.reason && <p className="mt-1 text-sm text-slate-300">{elig.reason}</p>}
-        <button disabled className="mt-4 w-full cursor-not-allowed rounded-xl bg-slate-600 px-4 py-3 font-bold text-slate-300">
-          {elig.can_start ? "Exam interface arrives in the next build phase" : "Start exam"}
+        {elig.can_start && !elig.in_progress && (
+          <div className="mt-4 rounded-xl border border-amber-300/40 bg-amber-950/30 p-3 text-sm text-amber-100">
+            <p className="font-semibold">Before you start</p>
+            <ul className="mt-1 list-disc space-y-1 pl-5">
+              <li>180 questions in 120 minutes. The timer is kept by the server and cannot be paused.</li>
+              <li>Do not leave this page, switch apps or lock your phone: that can submit your exam automatically.</li>
+              <li>You get one official attempt per day. Answers save automatically.</li>
+            </ul>
+          </div>
+        )}
+        {needShare && (
+          <div className="mt-4 rounded-xl border border-white/20 bg-brand-navy p-3 text-sm">
+            <p className="font-semibold">Share to unlock today's exam</p>
+            <p className="mt-1 text-slate-300">Share AlphaPrep NG with your friends on WhatsApp, then confirm below.</p>
+            <a
+              target="_blank" rel="noopener noreferrer"
+              href={`https://wa.me/?text=${encodeURIComponent(`${site?.settings?.whatsapp_share_message ?? "Join me on the AlphaPrep NG daily UTME mock exam:"} ${site?.settings?.site_url || window.location.origin}`)}`}
+              className="mt-2 inline-block rounded-lg bg-emerald-500 px-4 py-2 font-semibold text-brand-navy"
+            >
+              Share on WhatsApp
+            </a>
+            <label className="mt-3 flex items-start gap-2">
+              <input type="checkbox" checked={shared} onChange={(e) => setShared(e.target.checked)} className="mt-1 h-5 w-5 accent-[#2d9cf1]" />
+              <span>I have shared it. <span className="text-xs text-slate-400">(We cannot check whether a message was sent; this is on your honour.)</span></span>
+            </label>
+          </div>
+        )}
+        {startError && <div className="mt-3"><StateBox kind="error">{startError}</StateBox></div>}
+        <button
+          disabled={!elig.can_start || busy || (needShare && !shared)}
+          onClick={startExam}
+          className="mt-4 w-full rounded-xl bg-brand-blue px-4 py-3 font-bold text-brand-navy disabled:cursor-not-allowed disabled:bg-slate-600 disabled:text-slate-300"
+        >
+          {busy ? "Starting…" : elig.in_progress ? "RESUME EXAM" : "START EXAM"}
         </button>
+        {elig.already_attempted && !elig.in_progress && (
+          <p className="mt-3 text-sm">
+            <Link className="font-semibold text-brand-blue underline" to={`/result?id=${p.id}`}>View my result</Link>
+          </p>
+        )}
       </section>
     </Shell>
   );

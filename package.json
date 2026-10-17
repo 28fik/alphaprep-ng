@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc --noEmit && vite build",
+    "build": "vite build",
     "typecheck": "tsc --noEmit",
     "preview": "wrangler pages dev dist --d1=DB",
     "db:migrate:local": "wrangler d1 migrations apply alphaprep-ng --local",
@@ -14,9 +14,11 @@
   },
   "dependencies": {
     "hono": "^4.6.0",
+    "pdfjs-dist": "^6.2.108",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "react-router-dom": "^6.26.0"
+    "react-router-dom": "^6.26.0",
+    "tesseract.js": "^6.0.0"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20240909.0",

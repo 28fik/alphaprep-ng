@@ -6,7 +6,7 @@ import { BRAND, SOCIAL_LINKS } from "../lib/constants";
 const NAV = [
   { to: "/", label: "Home", end: true },
   { to: "/#how-it-works", label: "How it works", hash: true },
-  { to: "/#leaderboards", label: "Leaderboards", hash: true },
+  { to: "/leaderboard", label: "Leaderboards" },
   { to: "/start", label: "Start exam" },
 ];
 

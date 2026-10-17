@@ -20,7 +20,10 @@ class TestStmt {
     this.sql = sql;
   }
   bind(...values: unknown[]) {
-    this.params = values as Param[];
+    // Cloudflare D1 allows at most 100 bound parameters per query; node:sqlite allows far more, so enforce it here.
+    if (values.length > 100) throw new Error(`D1 limit: ${values.length} bound parameters (max 100)`);
+    // D1 takes ArrayBuffer for blobs; node:sqlite wants Uint8Array
+    this.params = values.map((v) => (v instanceof ArrayBuffer ? new Uint8Array(v) : v)) as Param[];
     return this;
   }
   async first<T = Record<string, unknown>>(): Promise<T | null> {

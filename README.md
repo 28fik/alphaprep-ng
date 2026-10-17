@@ -8,24 +8,27 @@ React + TypeScript + Vite frontend, Cloudflare Pages Functions (Workers) backend
 
 | Phase | Scope | Status |
 |---|---|---|
-| 1 | Structure, responsive frontend, database schema, navigation | Done |
-| 2 | Participant registration, ID lookup, recovery, admin login | **Written and tested (server logic).** Web routes and React pages **not yet run**, see below |
-| 3 | Question bank, bulk import, exam generation | Not started |
-| 4 | Exam interface, scoring, answer protection, corrections | Not started |
-| 5 | Daily/weekly leaderboards (database views already exist) | Not started |
-| 6 | Settings, audit-log viewer, hardening, remaining tests | Not started |
-| 7 | Deployment walkthrough | Config files exist; not deployed |
+| 1 | Structure, responsive frontend, database schema | Written |
+| 2 | Registration, ID lookup, recovery, admin login | Written, server logic tested |
+| 3 | Question bank, bulk import (CSV, Excel, pasted text, text PDF, scanned PDF via OCR), exam generation, preview, approve, publish and freeze | Written, server logic tested; import readers partly tested |
+| 4 | Exam screen, server-side deadline, autosave, scoring, corrections release | Written, server logic tested |
+| 5 | Daily and weekly leaderboards (ties share a rank) | Written, server logic tested |
+| 6 | Admin panel (roles, participants, score adjustment, settings, announcements, logo, audit log, CSV exports) | Written, server logic tested |
+| 7 | Deployment walkthrough | See `DEPLOY.md`. **Not deployed or run on Cloudflare yet** |
 
 ### What is verified, and what is not
 
-**Verified by running it (38 automated tests, all passing):** registration, Participant ID format and uniqueness (including collision retry and atomic rollback), subject rules, duplicate-registration guard, rate limits, ID-guessing protection, privacy of the lookup screen, recovery-code device linking and lockout, subject-change locking around exams, one-attempt-per-day, admin bootstrap (works once only), login, lockout, sessions, CSRF, role permissions. These run the real database migrations on SQLite through Node's built-in test runner.
+**Verified by running it (99 automated tests, all passing):** the server logic in `server/*.ts` (registration, recovery, rate limits, admin login and roles, question validation and import staging, exam generation and freezing, attempts, deadlines, scoring, leaderboards, score adjustments, settings validation, exports), run against the real migrations on SQLite through Node's built-in test runner. Also tested: the CSV, Excel and PDF-text readers on small sample files.
 
-**Not verified:**
-- The Hono web routes (`server/app.ts`) and the React pages have **not been run or type-checked** here, because package installation was blocked in the build workspace. They were syntax-checked and their imports resolve, nothing more. The first `npm install && npm run build` is their first real compile, so expect possible small fixes.
-- Behaviour on real Cloudflare (D1, Workers CPU limits) has not been tested. In particular, **PBKDF2 password hashing at 100,000 iterations may exceed the Workers Free 10 ms CPU limit** and make admin login fail. If that happens, set `PBKDF2_ITERATIONS` lower (for example 50000) and tell me; this is a security/free-tier trade-off to decide together.
-- Tests are not a security audit.
+**Not verified. Please read this:**
+- The React pages and the Hono routes (`server/app.ts`) have **never been compiled with the real dependencies** (package installation was blocked in the build workspace). They were bundled and type-checked only against loose stand-ins. The first `npm install && npm run build` is their first real compile, so expect small fixes.
+- **Nothing has run on real Cloudflare** (D1 behaviour, Workers limits). PBKDF2 at 100,000 iterations may exceed the free 10 ms CPU limit; if admin login fails, set `PBKDF2_ITERATIONS` lower (for example 50000).
+- PDF reading (pdfjs-dist) and scanned-PDF OCR (tesseract.js) have not been run in a browser. OCR output always needs human review.
+- The share gate only records that the participant ticked a box; it does **not** verify a WhatsApp share.
+- A participant who loses both device and recovery code needs an administrator to reset the recovery code.
+- Tests are not a security audit. No browser or load testing was done.
 
-Run the tests (needs Node 22.13 or newer, because they use Node's built-in SQLite):
+Run the tests (Node 22.13 or newer):
 
 ```
 npm test
@@ -68,16 +71,12 @@ wrangler.toml                 Cloudflare config (paste your D1 database_id)
 .dev.vars.example             Example secrets (copy to .dev.vars, never commit)
 ```
 
-## Setup notes
+## Setup
 
-1. Secrets, set in the Cloudflare dashboard (Pages project, Settings, Variables and Secrets), never in GitHub:
-   - `SESSION_PEPPER`: a long random string (32+ characters).
-   - `ADMIN_BOOTSTRAP_SECRET`: another long random string (24+ characters).
-2. Create the D1 database `alphaprep-ng`, paste its ID into `wrangler.toml`, bind it to the Pages project as `DB`, and run the three migration files in order.
-3. Open `/admin/setup`, enter the bootstrap secret and choose your admin username and password (12+ characters), then sign in at `/admin/login`.
+Follow **DEPLOY.md** (works from a phone or a PC, free plan only). In short: create the D1 database, put its ID in `wrangler.toml`, run the four files in `migrations/` in order, connect the repository to Cloudflare Pages (build `npm run build`, output `dist`), add the secrets `SESSION_PEPPER` and `ADMIN_BOOTSTRAP_SECRET` in the dashboard (never in GitHub), then open `/admin/setup`.
 
-A full phone/PC-friendly deployment walkthrough comes in Phase 7.
+The repository is public, so keep every secret out of it. You can make it private later in GitHub settings; Cloudflare Pages can still build a private repository.
 
 ## Logo
 
-Put your official logo at `public/logo.png`, then in `src/components/Logo.tsx` uncomment the `<img>` line and delete the text block.
+Upload the official logo in the admin **Settings** page (PNG, JPEG or WebP, 300 KB or less). Until then the site shows the name as text.

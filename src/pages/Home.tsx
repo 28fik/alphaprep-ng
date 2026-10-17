@@ -35,7 +35,7 @@ function Leaderboard({ title, rows, loading }: { title: string; rows: Leaderboar
             {rows.map((r) => (
               <li key={`${r.rank}-${r.display_name}`} className="flex items-center justify-between py-2 text-sm">
                 <span><span className="mr-3 inline-block w-6 font-bold text-brand-blue">{r.rank}</span>{r.display_name}</span>
-                <span className="font-semibold tabular-nums">{r.total_score}</span>
+                <span className="font-semibold tabular-nums">{r.total_score ?? r.weekly_total}</span>
               </li>
             ))}
           </ol>
@@ -45,10 +45,31 @@ function Leaderboard({ title, rows, loading }: { title: string; rows: Leaderboar
   );
 }
 
+function socials(status: PublicStatus | null) {
+  const s = status?.settings;
+  return [
+    { label: "X", href: s?.social_x || SOCIAL_LINKS[0].href },
+    { label: "TikTok", href: s?.social_tiktok || SOCIAL_LINKS[1].href },
+    { label: "WhatsApp Channel", href: s?.social_whatsapp || SOCIAL_LINKS[2].href },
+  ];
+}
+
 export default function Home() {
   const [status, setStatus] = useState<PublicStatus | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
+  const [daily, setDaily] = useState<LeaderboardRow[] | null>(null);
+  const [weekly, setWeekly] = useState<LeaderboardRow[] | null>(null);
+  const [lbLoading, setLbLoading] = useState(true);
+
+  useEffect(() => {
+    let alive = true;
+    Promise.all([
+      api<{ rows: LeaderboardRow[] }>("/leaderboard/daily?limit=5").then((r) => alive && setDaily(r.rows)),
+      api<{ rows: LeaderboardRow[] }>("/leaderboard/weekly?limit=5").then((r) => alive && setWeekly(r.rows)),
+    ]).catch(() => undefined).finally(() => alive && setLbLoading(false));
+    return () => { alive = false; };
+  }, []);
 
   useEffect(() => {
     let alive = true;
@@ -161,20 +182,21 @@ export default function Home() {
         </ol>
       </section>
 
-      {/* Leaderboards (live data arrives in Phase 5) */}
+      {/* Leaderboards (top 5 each; full lists on /leaderboard) */}
       <section id="leaderboards" className="mt-12 scroll-mt-20" aria-labelledby="lbs">
         <h2 id="lbs" className="text-xl font-bold">Leaderboards</h2>
         <div className="mt-4 grid gap-4 md:grid-cols-2">
-          <Leaderboard title="Daily leaderboard" rows={null} loading={loading} />
-          <Leaderboard title="Weekly leaderboard" rows={null} loading={loading} />
+          <Leaderboard title="Daily leaderboard" rows={daily} loading={lbLoading} />
+          <Leaderboard title="Weekly leaderboard" rows={weekly} loading={lbLoading} />
         </div>
+        <Link to="/leaderboard" className="mt-3 inline-block text-sm font-semibold text-brand-blue underline">See full leaderboards</Link>
       </section>
 
       {/* Social */}
       <section className="mt-12" aria-labelledby="soc">
         <h2 id="soc" className="text-xl font-bold">Follow AlphaPrep NG</h2>
         <ul className="mt-3 flex flex-wrap gap-3">
-          {SOCIAL_LINKS.map((s) => (
+          {socials(status).map((s) => (
             <li key={s.href}>
               <a href={s.href} target="_blank" rel="noopener noreferrer"
                  className="inline-block rounded-xl border border-brand-blue/60 px-5 py-3 text-sm font-semibold text-brand-blue hover:bg-brand-blue hover:text-brand-navy">

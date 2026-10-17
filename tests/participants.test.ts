@@ -29,6 +29,11 @@ const insertExam = (db: TestDb, status: string, start: string, end: string, date
   db.raw
     .prepare("INSERT INTO exams (exam_date, title, status, starts_at, ends_at, correction_release_at) VALUES (?, 'Mock', ?, ?, ?, ?)")
     .run(date, status, start, end, end);
+// (the exam covers every subject, as a real one normally does)
+const insertExamAll = (db: TestDb, status: string, start: string, end: string, date = "2026-10-14") => {
+  insertExam(db, status, start, end, date);
+  db.raw.prepare("INSERT INTO exam_subjects (exam_id, subject_id, question_count) SELECT (SELECT MAX(id) FROM exams), id, 40 FROM subjects").run();
+};
 
 const count = (db: TestDb, sql: string, ...p: any[]) => (db.raw.prepare(sql).get(...p) as any).n as number;
 
@@ -188,7 +193,7 @@ test("eligibility follows the exam window, and a second attempt is refused", asy
   const elig = async () => ((await lookupParticipant(pctx(db), id, token)).body as any).eligibility;
 
   assert.equal((await elig()).can_start, false, "no exam scheduled");
-  insertExam(db, "published", "2026-10-14T09:00:00Z", "2026-10-14T20:00:00Z");
+  insertExamAll(db, "published", "2026-10-14T09:00:00Z", "2026-10-14T20:00:00Z");
   const open = await elig();
   assert.equal(open.phase, "ongoing");
   assert.equal(open.can_start, true);

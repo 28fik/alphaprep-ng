@@ -146,7 +146,7 @@ async function loadParticipant(db: Db, id: string): Promise<ParticipantRow | nul
     .first<ParticipantRow>();
 }
 
-async function isTrustedDevice(db: Db, participantId: string, deviceToken: string | undefined): Promise<boolean> {
+export async function isTrustedDevice(db: Db, participantId: string, deviceToken: string | undefined): Promise<boolean> {
   if (!deviceToken) return false;
   const row = await db
     .prepare("SELECT 1 AS ok FROM participant_devices WHERE participant_id = ? AND token_hash = ?")
@@ -189,23 +189,37 @@ async function eligibility(ctx: Ctx, participantId: string) {
   const exam = await currentExam(ctx.db, ctx.now);
   const phase: Phase = computePhase(exam, ctx.now.toISOString());
   let alreadyAttempted = false;
+  let inProgress = false;
+  let covered = true;
   if (exam) {
     const a = await ctx.db
-      .prepare("SELECT 1 AS ok FROM attempts WHERE participant_id = ? AND exam_id = ?")
+      .prepare("SELECT status, deadline_at FROM attempts WHERE participant_id = ? AND exam_id = ?")
+      .bind(participantId, exam.id)
+      .first<{ status: string; deadline_at: string }>();
+    alreadyAttempted = !!a;
+    inProgress = !!a && a.status === "in_progress" && a.deadline_at > ctx.now.toISOString();
+    const miss = await ctx.db
+      .prepare(
+        `SELECT 1 AS m FROM (SELECT subject_id FROM participant_subjects WHERE participant_id = ? UNION SELECT 'english')
+          WHERE subject_id NOT IN (SELECT subject_id FROM exam_subjects WHERE exam_id = ?) LIMIT 1`,
+      )
       .bind(participantId, exam.id)
       .first();
-    alreadyAttempted = !!a;
+    covered = !miss;
   }
   let reason: string | undefined;
   if (phase === "none") reason = "No examination is open right now.";
   else if (phase === "registration_open") reason = "The examination has not started yet.";
-  else if (phase === "closed") reason = "Today's examination has closed.";
+  else if (inProgress) reason = undefined;
+  else if (phase === "closed" && !alreadyAttempted) reason = "Today's examination has closed.";
   else if (alreadyAttempted) reason = "You have already taken this examination.";
+  else if (!covered) reason = "Today's examination does not include all of your subjects.";
   return {
     phase,
     exam: exam ? { exam_date: exam.exam_date, title: exam.title, starts_at: exam.starts_at, ends_at: exam.ends_at } : null,
     already_attempted: alreadyAttempted,
-    can_start: phase === "ongoing" && !alreadyAttempted,
+    in_progress: inProgress,
+    can_start: (phase === "ongoing" && !alreadyAttempted && covered) || inProgress,
     reason,
   };
 }

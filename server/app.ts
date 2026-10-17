@@ -1,10 +1,16 @@
 import { Hono, type Context } from "hono";
 import { csrfValid, getSession, hasPermission, loginAdmin, logoutAdmin, setupStatus, bootstrapAdmin, type AdminCtx, type AdminSession } from "./admin.ts";
 import { sha256Hex } from "./crypto.ts";
+import { getCorrections, getMyResult, getPaper, saveAnswers, startAttempt, submitAttempt, sweepExpired } from "./attempts.ts";
+import { adjustResult, changeOwnPassword, createAdmin, getParticipantAdmin, listAdmins, listAudit, overview, resetRecoveryCode, searchParticipants, setAdminStatus, setParticipantStatus, setResultEligibility, type OpCtx } from "./adminOps.ts";
+import { approveExam, cancelExam, createExam, generateSubject, listExams, previewExam, publishExam, unapproveExam, updateExam, type ECtx } from "./exams.ts";
+import { availableDates, dailyLeaderboard, exportDailyCsv, exportParticipantsCsv, exportResultsCsv, exportWeeklyCsv, isDate, weeklyLeaderboard } from "./leaderboard.ts";
+import { addImportRows, commitImport, createQuestion, deleteQuestions, discardImport, editImportRow, exportQuestionsCsv, IMPORT_TEMPLATE_CSV, importPreview, listQuestions, questionStats, setImportRowStatus, setVerification, startImport, updateQuestion, type QCtx } from "./questions.ts";
+import { deleteAnnouncement, getLogo, getSettings, listAnnouncements, saveAnnouncement, saveLogo, updateSettings, MAX_LOGO_BYTES, type SCtx } from "./settings.ts";
 import type { Db } from "./db.ts";
 import { lookupParticipant, registerParticipant, updateSubjects, verifyRecovery, type Ctx, type Result } from "./participants.ts";
 import { computePhase, currentExam } from "./status.ts";
-import { nowIso } from "./time.ts";
+import { lagosDate, nowIso } from "./time.ts";
 
 export interface Env {
   DB: D1Database;
@@ -76,11 +82,13 @@ function setCookie(c: AppContext, name: string, value: string, maxAgeSeconds: nu
 }
 const clearCookie = (c: AppContext, name: string) => setCookie(c, name, "", 0, "Strict");
 
-async function readJson(c: AppContext): Promise<unknown | null> {
-  const len = Number(c.req.header("Content-Length") ?? "0");
-  if (len > 20_000) return null;
+async function readJson(c: AppContext, maxChars = 20_000): Promise<unknown | null> {
   try {
-    return await c.req.json();
+    const declared = Number(c.req.header("content-length") ?? 0);
+    if (declared > maxChars * 4) return null; // refuse before reading the body
+    const text = await c.req.text();
+    if (text.length > maxChars) return null;
+    return JSON.parse(text);
   } catch {
     return null;
   }
@@ -113,7 +121,7 @@ app.use("*", async (c, next) => {
     }
   }
   await next();
-  c.header("Cache-Control", "no-store");
+  if (!c.res.headers.has("Cache-Control")) c.header("Cache-Control", "no-store");
   c.header("X-Content-Type-Options", "nosniff");
   c.header("Referrer-Policy", "same-origin");
 });
@@ -137,6 +145,7 @@ app.get("/status", async (c) => {
     exam: exam ? { exam_date: exam.exam_date, title: exam.title, starts_at: exam.starts_at, ends_at: exam.ends_at } : null,
     countdown: s.utme_countdown_date ? { target: s.utme_countdown_date, label: s.utme_countdown_label ?? "UTME countdown" } : null,
     announcements: ann.results,
+    settings: await getSettings(db, true),
   });
 });
 
@@ -217,6 +226,249 @@ app.post("/admin/logout", async (c) => {
   clearCookie(c, adminCookieName(isHttps(c)));
   return c.json({ ok: true });
 });
+
+
+// ---- public: leaderboards, logo -------------------------------------------------------------
+const cachePublic = (c: AppContext, seconds: number) => c.header("Cache-Control", `public, max-age=${seconds}`);
+
+app.get("/leaderboard/daily", async (c) => {
+  const db = c.env.DB as unknown as Db;
+  const now = new Date();
+  await sweepExpired(db, now, 2);
+  const q = c.req.query("date");
+  const date = q === undefined ? lagosDate(now) : isDate(q) ? q : null;
+  if (!date) return c.json({ error: "Invalid date." }, 400);
+  cachePublic(c, 30);
+  return c.json(await dailyLeaderboard(db, date, c.req.query("limit"), Math.max(0, Number(c.req.query("offset")) || 0)));
+});
+
+app.get("/leaderboard/weekly", async (c) => {
+  const db = c.env.DB as unknown as Db;
+  const now = new Date();
+  await sweepExpired(db, now, 2);
+  const q = c.req.query("date");
+  const date = q === undefined ? lagosDate(now) : isDate(q) ? q : null;
+  if (!date) return c.json({ error: "Invalid date." }, 400);
+  cachePublic(c, 30);
+  return c.json(await weeklyLeaderboard(db, date, c.req.query("limit"), Math.max(0, Number(c.req.query("offset")) || 0)));
+});
+
+app.get("/leaderboard/dates", async (c) => {
+  cachePublic(c, 60);
+  return c.json({ dates: await availableDates(c.env.DB as unknown as Db) });
+});
+
+app.get("/logo", async (c) => {
+  const logo = await getLogo(c.env.DB as unknown as Db);
+  if (!logo) return c.json({ error: "Not found." }, 404);
+  return c.body(logo.data as unknown as ArrayBuffer, 200, { "Content-Type": logo.type, "Cache-Control": "public, max-age=3600", "Content-Security-Policy": "default-src 'none'" });
+});
+
+// ---- participants: taking the exam -----------------------------------------------------------
+const attemptToken = (c: AppContext) => c.req.header("X-Attempt-Token") ?? undefined;
+const attemptId = (c: AppContext) => Number(c.req.param("attemptId"));
+
+app.post("/exam/start", async (c) => {
+  const body = (await readJson(c)) as { id?: unknown; share_confirmed?: unknown } | null;
+  if (!body) return badBody(c);
+  return respond(c, await startAttempt(await baseCtx(c), body.id, deviceToken(c), body));
+});
+app.get("/exam/:attemptId/paper", async (c) => respond(c, await getPaper({ db: c.env.DB as unknown as Db, now: new Date() }, attemptId(c), attemptToken(c))));
+app.put("/exam/:attemptId/answers", async (c) => {
+  const body = (await readJson(c)) as { answers?: unknown } | null;
+  if (!body) return badBody(c);
+  return respond(c, await saveAnswers({ db: c.env.DB as unknown as Db, now: new Date() }, attemptId(c), attemptToken(c), body.answers));
+});
+app.post("/exam/:attemptId/submit", async (c) => {
+  const body = (await readJson(c)) as { answers?: unknown; reason?: unknown } | null;
+  if (!body) return badBody(c);
+  return respond(c, await submitAttempt({ db: c.env.DB as unknown as Db, now: new Date() }, attemptId(c), attemptToken(c), body));
+});
+app.post("/me/result", async (c) => {
+  const body = (await readJson(c)) as { id?: unknown; date?: unknown } | null;
+  if (!body) return badBody(c);
+  return respond(c, await getMyResult(await baseCtx(c), body.id, deviceToken(c), typeof body.date === "string" ? body.date : undefined));
+});
+app.post("/me/corrections", async (c) => {
+  const body = (await readJson(c)) as { id?: unknown; date?: unknown } | null;
+  if (!body) return badBody(c);
+  return respond(c, await getCorrections(await baseCtx(c), body.id, deviceToken(c), body.date));
+});
+
+// ---- admin helpers ---------------------------------------------------------------------------
+type AdminHandler = (c: AppContext, s: AdminSession, ids: { db: Db; now: Date; ipHash: string }) => Promise<Response>;
+function guarded(permission: string | undefined, fn: AdminHandler) {
+  return async (c: AppContext) => {
+    const a = await requireAdmin(c, permission);
+    if (a instanceof Response) return a;
+    const base = await baseCtx(c);
+    return fn(c, a.session, { db: base.db, now: base.now, ipHash: base.ipHash });
+  };
+}
+const qctx = (s: AdminSession, i: { db: Db; now: Date; ipHash: string }): QCtx => ({ ...i, adminId: s.admin.id });
+const ectx = (s: AdminSession, i: { db: Db; now: Date; ipHash: string }): ECtx => ({ ...i, adminId: s.admin.id });
+const sctx = (s: AdminSession, i: { db: Db; now: Date; ipHash: string }): SCtx => ({ ...i, adminId: s.admin.id });
+async function opctx(c: AppContext, s: AdminSession, i: { db: Db; now: Date; ipHash: string }): Promise<OpCtx> {
+  const a = await adminCtx(c);
+  return { ...i, adminId: s.admin.id, pepper: a.pepper, iterations: a.iterations };
+}
+const numParam = (c: AppContext, name: string) => Number(c.req.param(name));
+const csvResponse = (c: AppContext, csv: string, name: string) =>
+  c.body(csv, 200, { "Content-Type": "text/csv; charset=utf-8", "Content-Disposition": `attachment; filename="${name}"`, "Cache-Control": "no-store" });
+const BIG = 600_000;
+
+app.get("/admin/overview", guarded("exams.read", async (c, _s, i) => c.json(await overview(i.db, lagosDate(i.now)))));
+
+// ---- admin: question bank ---------------------------------------------------------------------
+const filtersOf = (c: AppContext) => ({
+  subject: c.req.query("subject") || undefined, topic: c.req.query("topic") || undefined, status: c.req.query("status") || undefined,
+  has_key: c.req.query("has_key") || undefined, q: c.req.query("q") || undefined,
+  page: Number(c.req.query("page")) || 1, page_size: Number(c.req.query("page_size")) || 25,
+});
+app.get("/admin/questions", guarded("questions.read", async (c, _s, i) => c.json(await listQuestions(i.db, filtersOf(c)))));
+app.get("/admin/questions/stats", guarded("questions.read", async (c, _s, i) => c.json({ subjects: await questionStats(i.db) })));
+app.get("/admin/questions/export", guarded("questions.read", async (c, _s, i) => csvResponse(c, await exportQuestionsCsv(i.db, filtersOf(c)), "alphaprep-questions.csv")));
+app.get("/admin/questions/template", guarded("questions.write", async (c) => csvResponse(c, IMPORT_TEMPLATE_CSV, "alphaprep-import-template.csv")));
+app.post("/admin/questions", guarded("questions.write", async (c, s, i) => {
+  const body = await readJson(c, 40_000);
+  if (!body || typeof body !== "object") return badBody(c);
+  return respond(c, await createQuestion(qctx(s, i), body as Record<string, unknown>));
+}));
+app.put("/admin/questions/:id", guarded("questions.write", async (c, s, i) => {
+  const body = await readJson(c, 40_000);
+  if (!body || typeof body !== "object") return badBody(c);
+  return respond(c, await updateQuestion(qctx(s, i), numParam(c, "id"), body as Record<string, unknown>));
+}));
+app.post("/admin/questions/delete", guarded("questions.write", async (c, s, i) => {
+  const body = (await readJson(c)) as { ids?: unknown } | null;
+  if (!body || !Array.isArray(body.ids)) return badBody(c);
+  return respond(c, await deleteQuestions(qctx(s, i), body.ids.map(Number)));
+}));
+app.post("/admin/questions/status", guarded("questions.write", async (c, s, i) => {
+  const body = (await readJson(c)) as { ids?: unknown; status?: unknown } | null;
+  if (!body || !Array.isArray(body.ids) || typeof body.status !== "string") return badBody(c);
+  return respond(c, await setVerification(qctx(s, i), body.ids.map(Number), body.status));
+}));
+
+// ---- admin: bulk import (the browser parses files; the server validates and saves in small chunks) ----
+app.post("/admin/imports", guarded("questions.write", async (c, s, i) => {
+  const body = (await readJson(c)) as { file_name?: unknown; file_type?: unknown } | null;
+  if (!body) return badBody(c);
+  return respond(c, await startImport(qctx(s, i), String(body.file_name ?? ""), String(body.file_type ?? "")));
+}));
+app.post("/admin/imports/:id/rows", guarded("questions.write", async (c, s, i) => {
+  const body = (await readJson(c, BIG)) as { rows?: unknown } | null;
+  if (!body || !Array.isArray(body.rows)) return badBody(c);
+  return respond(c, await addImportRows(qctx(s, i), numParam(c, "id"), body.rows));
+}));
+app.get("/admin/imports/:id", guarded("questions.write", async (c, s, i) => respond(c, await importPreview(i.db, s.admin.id, numParam(c, "id"), Number(c.req.query("page")) || 1))));
+app.put("/admin/imports/:id/rows/:row", guarded("questions.write", async (c, s, i) => {
+  const body = await readJson(c, 40_000);
+  if (!body || typeof body !== "object") return badBody(c);
+  return respond(c, await editImportRow(qctx(s, i), numParam(c, "id"), numParam(c, "row"), body as Record<string, unknown>));
+}));
+app.post("/admin/imports/:id/rows-status", guarded("questions.write", async (c, s, i) => {
+  const body = (await readJson(c)) as { rows?: unknown; status?: unknown } | null;
+  if (!body || !Array.isArray(body.rows) || (body.status !== "approved" && body.status !== "rejected")) return badBody(c);
+  return respond(c, await setImportRowStatus(qctx(s, i), numParam(c, "id"), body.rows.map(Number), body.status));
+}));
+app.post("/admin/imports/:id/commit", guarded("questions.write", async (c, s, i) => respond(c, await commitImport(qctx(s, i), numParam(c, "id")))));
+app.post("/admin/imports/:id/discard", guarded("questions.write", async (c, s, i) => respond(c, await discardImport(qctx(s, i), numParam(c, "id")))));
+
+// ---- admin: exams ------------------------------------------------------------------------------
+app.get("/admin/exams", guarded("exams.read", async (c, _s, i) => c.json({ exams: await listExams(i.db) })));
+app.post("/admin/exams", guarded("exams.write", async (c, s, i) => {
+  const body = await readJson(c);
+  if (!body || typeof body !== "object") return badBody(c);
+  return respond(c, await createExam(ectx(s, i), body as Record<string, unknown>));
+}));
+app.put("/admin/exams/:id", guarded("exams.write", async (c, s, i) => {
+  const body = await readJson(c);
+  if (!body || typeof body !== "object") return badBody(c);
+  return respond(c, await updateExam(ectx(s, i), numParam(c, "id"), body as Record<string, unknown>));
+}));
+app.post("/admin/exams/:id/generate", guarded("exams.write", async (c, s, i) => {
+  const body = (await readJson(c)) as { subject?: unknown } | null;
+  if (!body || typeof body.subject !== "string") return badBody(c);
+  return respond(c, await generateSubject(ectx(s, i), numParam(c, "id"), body.subject));
+}));
+app.get("/admin/exams/:id/preview", guarded("questions.read", async (c, s, i) => respond(c, await previewExam(i.db, numParam(c, "id"), { now: i.now, liveKeysAllowed: hasPermission(s, "exams.write") }))));
+app.post("/admin/exams/:id/approve", guarded("exams.write", async (c, s, i) => respond(c, await approveExam(ectx(s, i), numParam(c, "id")))));
+app.post("/admin/exams/:id/unapprove", guarded("exams.write", async (c, s, i) => respond(c, await unapproveExam(ectx(s, i), numParam(c, "id")))));
+app.post("/admin/exams/:id/publish", guarded("exams.write", async (c, s, i) => respond(c, await publishExam(ectx(s, i), numParam(c, "id")))));
+app.post("/admin/exams/:id/cancel", guarded("exams.write", async (c, s, i) => respond(c, await cancelExam(ectx(s, i), numParam(c, "id")))));
+
+// ---- admin: participants, results, exports ----------------------------------------------------
+app.get("/admin/participants", guarded("participants.read", async (c, _s, i) => c.json(await searchParticipants(i.db, c.req.query("q") ?? "", Number(c.req.query("page")) || 1))));
+app.get("/admin/participants/:id", guarded("participants.read", async (c, _s, i) => respond(c, await getParticipantAdmin(i.db, c.req.param("id")))));
+app.post("/admin/participants/:id/status", guarded("participants.write", async (c, s, i) => {
+  const body = (await readJson(c)) as { suspend?: unknown; reason?: unknown } | null;
+  if (!body) return badBody(c);
+  return respond(c, await setParticipantStatus(await opctx(c, s, i), c.req.param("id"), body.suspend === true, body.reason));
+}));
+app.post("/admin/participants/:id/reset-recovery", guarded("participants.write", async (c, s, i) => respond(c, await resetRecoveryCode(await opctx(c, s, i), c.req.param("id")))));
+app.post("/admin/results/:attemptId/adjust", guarded("participants.write", async (c, s, i) => {
+  const body = (await readJson(c)) as { new_total?: unknown; reason?: unknown } | null;
+  if (!body) return badBody(c);
+  return respond(c, await adjustResult(await opctx(c, s, i), attemptId(c), body.new_total, body.reason));
+}));
+app.post("/admin/results/:attemptId/eligibility", guarded("participants.write", async (c, s, i) => {
+  const body = (await readJson(c)) as { eligible?: unknown; reason?: unknown } | null;
+  if (!body) return badBody(c);
+  return respond(c, await setResultEligibility(await opctx(c, s, i), attemptId(c), body.eligible === true, body.reason));
+}));
+app.get("/admin/export/daily", guarded("reports.read", async (c, _s, i) => {
+  const d = c.req.query("date");
+  if (!isDate(d)) return c.json({ error: "Invalid date." }, 400);
+  return csvResponse(c, await exportDailyCsv(i.db, d), `alphaprep-daily-${d}.csv`);
+}));
+app.get("/admin/export/weekly", guarded("reports.read", async (c, _s, i) => {
+  const d = c.req.query("date");
+  if (!isDate(d)) return c.json({ error: "Invalid date." }, 400);
+  return csvResponse(c, await exportWeeklyCsv(i.db, d), `alphaprep-weekly-${d}.csv`);
+}));
+app.get("/admin/export/participants", guarded("participants.read", async (c, _s, i) => csvResponse(c, await exportParticipantsCsv(i.db), "alphaprep-participants.csv")));
+app.get("/admin/export/results", guarded("reports.read", async (c, _s, i) => csvResponse(c, await exportResultsCsv(i.db), "alphaprep-results.csv")));
+
+// ---- admin: settings, announcements, logo, audit, administrators ----------------------------------
+app.get("/admin/settings", guarded("settings.write", async (c, _s, i) => c.json({ settings: await getSettings(i.db) })));
+app.put("/admin/settings", guarded("settings.write", async (c, s, i) => respond(c, await updateSettings(sctx(s, i), await readJson(c)))));
+app.get("/admin/announcements", guarded("settings.write", async (c, _s, i) => c.json({ announcements: await listAnnouncements(i.db) })));
+app.post("/admin/announcements", guarded("settings.write", async (c, s, i) => {
+  const body = await readJson(c);
+  if (!body || typeof body !== "object") return badBody(c);
+  return respond(c, await saveAnnouncement(sctx(s, i), null, body as Record<string, unknown>));
+}));
+app.put("/admin/announcements/:id", guarded("settings.write", async (c, s, i) => {
+  const body = await readJson(c);
+  if (!body || typeof body !== "object") return badBody(c);
+  return respond(c, await saveAnnouncement(sctx(s, i), numParam(c, "id"), body as Record<string, unknown>));
+}));
+app.delete("/admin/announcements/:id", guarded("settings.write", async (c, s, i) => respond(c, await deleteAnnouncement(sctx(s, i), numParam(c, "id")))));
+app.put("/admin/logo", guarded("settings.write", async (c, s, i) => {
+  const buf = new Uint8Array(await c.req.arrayBuffer());
+  if (buf.length > MAX_LOGO_BYTES) return c.json({ error: "Logo must be under 300 KB." }, 400);
+  return respond(c, await saveLogo(sctx(s, i), buf));
+}));
+app.get("/admin/audit", guarded("audit.read", async (c, _s, i) => c.json(await listAudit(i.db, Number(c.req.query("page")) || 1, c.req.query("action") || undefined))));
+app.get("/admin/admins", guarded("admins.manage", async (c, _s, i) => c.json({ admins: await listAdmins(i.db) })));
+app.post("/admin/admins", guarded("admins.manage", async (c, s, i) => {
+  const body = await readJson(c);
+  if (!body || typeof body !== "object") return badBody(c);
+  return respond(c, await createAdmin(await opctx(c, s, i), body as Record<string, unknown>));
+}));
+app.put("/admin/admins/:id", guarded("admins.manage", async (c, s, i) => {
+  const body = (await readJson(c)) as { status?: unknown; role?: unknown } | null;
+  if (!body || (body.status !== "active" && body.status !== "disabled")) return badBody(c);
+  return respond(c, await setAdminStatus(await opctx(c, s, i), numParam(c, "id"), body.status, body.role));
+}));
+app.post("/admin/password", guarded(undefined, async (c, s, i) => {
+  const body = (await readJson(c)) as { current?: unknown; next?: unknown } | null;
+  if (!body) return badBody(c);
+  const r = await changeOwnPassword(await opctx(c, s, i), body.current, body.next);
+  if (r.status === 200) clearCookie(c, adminCookieName(isHttps(c)));
+  return respond(c, r);
+}));
 
 app.notFound((c) => c.json({ error: "Not found." }, 404));
 app.onError((err, c) => {
